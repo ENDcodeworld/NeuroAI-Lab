@@ -1,0 +1,126 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:14-alpine
+    container_name: neuroai-postgres
+    environment:
+      POSTGRES_DB: neuroai
+      POSTGRES_USER: neuroai
+      POSTGRES_PASSWORD: neuroai123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neuroai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: neuroai-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB (for logs/analytics)
+  mongodb:
+    image: mongo:6
+    container_name: neuroai-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: neuroai
+      MONGO_INITDB_ROOT_PASSWORD: neuroai123
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: neuroai-backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://neuroai:neuroai123@postgres:5432/neuroai
+      REDIS_URL: redis://redis:6379
+      MONGODB_URL: mongodb://neuroai:neuroai123@mongodb:27017
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - eeg_data:/app/data
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: neuroai-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev
+
+  # Celery Worker (for async tasks)
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: neuroai-worker
+    environment:
+      DATABASE_URL: postgresql://neuroai:neuroai123@postgres:5432/neuroai
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./backend:/app
+      - eeg_data:/app/data
+    command: celery -A app.worker worker --loglevel=info
+
+  # Celery Flower (monitoring)
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: neuroai-flower
+    ports:
+      - "5555:5555"
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - redis
+    command: celery -A app.worker flower --port=5555
+
+volumes:
+  postgres_data:
+  redis_data:
+  mongodb_data:
+  eeg_data:
+
+networks:
+  default:
+    name: neuroai-network
